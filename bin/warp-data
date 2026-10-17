@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# soren.warp plugin — emit a single JSON object describing the WARP/Cloudflare
+# One connection state. Read-only: runs only `warp-cli status`, `warp-cli
+# registration *` and `warp-cli --json settings list`. No privileges needed;
+# every call is hard-timeout-guarded so a hung daemon can never block.
+set -uo pipefail
+export LC_ALL=C
+PATH=/usr/local/bin:/usr/bin:/bin
+
+TIMEOUT=3
+run() { timeout "$TIMEOUT" "$@" 2>/dev/null; }
+
+# --- 1. connection status (authoritative) -----------------------------------
+# warp-cli --json status returns {"status":"Connected","reason":"NetworkHealthy"}
+# for a healthy client, but when disconnected `reason` becomes a *nested object*
+# describing the settings change → we must not treat it as a string.
+# The daemon can also briefly emit an unparseable blob right after
+# connect/disconnect, so we retry a few times for a stable answer.
+status_json='{}'
+for _ in 1 2 3; do
+  status_json=$(run warp-cli --json status 2>/dev/null || echo '{}')
+  printf '%s' "$status_json" | jq -e '.status' >/dev/null 2>&1 && break
+  sleep 0.5
+done
+war_status=$(printf '%s' "$status_json" | jq -r '.status // empty' 2>/dev/null)
+war_reason=$(printf '%s' "$status_json" \
+  | jq -r 'if (.reason | type) == "string" then .reason else empty end' 2>/dev/null)
+war_reason_obj=$(printf '%s' "$status_json" \
+  | jq -r 'if (.reason | type) == "object" then (.reason | keys[0] // empty) else empty end' 2>/dev/null)
+
+# Fallback: when the daemon is down or unregistered, warp-cli --json status
+# returns non-zero / empty JSON. Distinguish the failure modes.
+if [ -z "$war_status" ]; then
+  if run warp-cli status >/dev/null 2>&1; then
+    war_status="Connecting"; war_reason="Starting"
+  else
+    war_status="Disconnected"; war_reason="Service unavailable"
+  fi
+fi
+
+# Disconnected states get a readable reason from the reason-object key
+# (e.g. "SettingsChanged" → "Settings changed").
+if [ "$war_status" = "Disconnected" ] && [ -n "$war_reason_obj" ] \
+   && [ -z "$war_reason" ]; then
+  war_reason=$(printf '%s' "$war_reason_obj" | sed -E 's/([a-z])([A-Z])/\1 \2/g' \
+    | sed -E 's/^(.)/\U\1/g' | tr '_' ' ')
+fi
+
+# --- 2. account type + organization ----------------------------------------
+acc_type=$(run warp-cli registration show 2>/dev/null \
+  | grep -iE '^Account type:' | sed -E 's/^Account type:[[:space:]]*//' || true)
+case "$acc_type" in
+  *Team*)       war_account="ZeroTrust" ;;
+  *Business*)   war_account="ZeroTrust" ;;
+  *Enterprise*) war_account="ZeroTrust" ;;
+  *Premium*|*Free*|*None*) war_account="Consumer" ;;
+  *)             war_account="Unknown" ;;
+esac
+war_org=$(run warp-cli registration organization 2>/dev/null | tr -d '[:space:]' || true)
+[ -z "$war_org" ] && war_org="unknown"
+
+# --- 3. settings (mode, always-on, locked) ---------------------------------
+settings_json=$(run warp-cli --json settings list 2>/dev/null || echo '{}')
+war_mode=$(printf '%s' "$settings_json" | jq -r '.settings.operation_mode // empty' 2>/dev/null)
+war_always_on=$(printf '%s' "$settings_json" | jq -r '.settings.always_on // false' 2>/dev/null)
+war_switch_locked=$(printf '%s' "$settings_json" | jq -r '.settings.switch_locked // false' 2>/dev/null)
+
+# switch_locked=true means the org policy forbids toggling.
+war_can_toggle=true
+[ "$war_switch_locked" = "true" ] && war_can_toggle=false
+[ "$war_account" = "Unknown" ] && war_can_toggle=false
+
+# --- 4. assemble -----------------------------------------------------------
+jq -n \
+  --arg status    "$war_status" \
+  --arg reason    "$war_reason" \
+  --arg account   "$war_account" \
+  --arg org       "$war_org" \
+  --arg mode      "$war_mode" \
+  --argjson alwaysOn "$war_always_on" \
+  --argjson switchLocked "$war_switch_locked" \
+  --argjson canToggle "$war_can_toggle" \
+  '{
+    status: $status,
+    reason: $reason,
+    account: $account,
+    organization: $org,
+    mode: $mode,
+    alwaysOn: $alwaysOn,
+    switchLocked: $switchLocked,
+    canToggle: $canToggle,
+    error: (if ($status == "Disconnected" and ($reason == "Service unavailable" or $reason == "Needs authentication")) then "service" else null end)
+  }'

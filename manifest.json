@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "soren.warp",
+  "name": "WARP",
+  "version": "1.0.0",
+  "author": "soren",
+  "license": "MIT",
+  "description": "Cloudflare WARP / Cloudflare One connection status in the bar, with a one-click toggle to connect or disconnect the tunnel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "WARP",
+    "description": "Shows WARP connection status; click to toggle connect/disconnect, right-click to open the panel.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLabel": false,
+      "pollIntervalSec": 5
+    },
+    "schema": [
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show \"WARP\" text next to the icon",
+        "defaultValue": false
+      },
+      {
+        "key": "pollIntervalSec",
+        "type": "integer",
+        "label": "Status refresh interval while the panel is open (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}

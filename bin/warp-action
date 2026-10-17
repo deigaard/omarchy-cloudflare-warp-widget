@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# soren.warp plugin — run a connection action, then print the same JSON blob
+# `warp-data` does so the panel can refresh in a single round trip.
+#
+#   warp-action connect     # warp-cli connect  (maintain a connection)
+#   warp-action disconnect  # warp-cli disconnect
+#   warp-action refresh     # just re-read state (no change)
+set -uo pipefail
+export LC_ALL=C
+PATH=/usr/local/bin:/usr/bin:/bin
+TIMEOUT=15
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+verb=${1:-refresh}
+
+case "$verb" in
+  connect)
+    timeout "$TIMEOUT" warp-cli connect 2>/dev/null || true
+    ;;
+  disconnect)
+    timeout "$TIMEOUT" warp-cli disconnect 2>/dev/null || true
+    ;;
+  refresh|"")
+    ;;
+  *)
+    echo "usage: warp-action [connect|disconnect|refresh]" >&2
+    exit 2
+    ;;
+esac
+
+# Re-emit current state after a brief settle so status reflects the change.
+# The daemon can be mid-transition immediately after connect/disconnect, so we
+# retry a few times waiting for a stable, parseable answer.
+if [ "$verb" != "refresh" ]; then
+  for i in 1 2 3 4 5; do
+    out=$("$SCRIPT_DIR/warp-data" 2>/dev/null) && echo "$out" | jq -e '.status' >/dev/null 2>&1 && { echo "$out"; exit 0; }
+    sleep 1
+  done
+  # last resort: emit whatever we have
+  "$SCRIPT_DIR/warp-data" 2>/dev/null
+else
+  exec "$SCRIPT_DIR/warp-data"
+fi
